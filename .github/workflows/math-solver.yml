@@ -1,0 +1,27 @@
+name: Math Solver
+
+on:
+  issue_comment:
+    types: [created, edited]
+
+jobs:
+  solve:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+      - name: Math Solver
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Extract the issue number and the comment body from the event data
+          ISSUE_NUMBER=$(jq -r '.issue.number' $GITHUB_EVENT_PATH)
+          COMMENT_BODY=$(jq -r '.comment.body' $GITHUB_EVENT_PATH)
+          # Check if the comment contains a math expression
+          if [[ "$COMMENT_BODY" =~ ^([0-9]*[+-/*]*[0-9]*)+$ ]]; then
+            # Evaluate the math expression
+            RESULT=$(echo "$COMMENT_BODY" | bc)
+            # Add the result as a comment to the issue
+            curl -H "Authorization: token $GITHUB_TOKEN" -X POST \
+              "https://api.github.com/repos/$GITHUB_REPOSITORY/issues/$ISSUE_NUMBER/comments" \
+              -d "{\"body\": \"$COMMENT_BODY = $RESULT\"}"
+          fi
