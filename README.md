@@ -6,8 +6,8 @@
 # Usage
 
 1. Create a GitHub Action workflow
-2. Copy and paste the above you can also modify the regex expression for other features
-3. Submit a comment with a math expression, and the bot will reply back
+2. Copy and paste the action from [here](https://github.com/stavares843/math-solver-bot/blob/main/.github/workflows/math-solver.yml) you can also modify the regex expression for other features
+3. Submit a comment in either issues or Pull Requests with a math expression, and the bot will reply back
 
 
 
