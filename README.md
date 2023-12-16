@@ -15,7 +15,3 @@
 
 
 <img width="600" alt="Captura de ecrã 2022-12-12, às 18 38 57" src="https://user-images.githubusercontent.com/29093946/207127409-a731bbec-37d5-43d8-ad1d-9e1845fbc233.png">
-
-# License
-
-[MIT](https://github.com/stavares843/math-solver-bot/blob/main/LICENSE)
