@@ -1,4 +1,4 @@
-# math-solver-bot
+# math-solver-bot 
 
 ![raycast-untitled](https://user-images.githubusercontent.com/29093946/207126560-251ef7c1-4b3c-43d0-8bd2-e628e9efa0c0.svg)
 
