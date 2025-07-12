@@ -1,21 +1,29 @@
-name: Say Hello on /cypress Comment
+name: Respond to /cypress Comment
 
 on:
   issue_comment:
     types: [created]
 
 jobs:
-  say-hello:
+  respond:
     if: github.event.issue.pull_request
     runs-on: ubuntu-latest
+    permissions:
+      issues: write  # Required to post comments
     steps:
-      - name: Check for 'cypress' in comment
+      - name: Reply if comment includes "cypress"
         run: |
           COMMENT_BODY="${{ github.event.comment.body }}"
-          echo "Received comment: $COMMENT_BODY"
+          ISSUE_URL="${{ github.event.comment.issue_url }}"
+          echo "Comment body: $COMMENT_BODY"
 
           if [[ "$COMMENT_BODY" =~ cypress ]]; then
-            echo "👋 Hello from Cypress!"
+            echo "✅ Posting reply to comment..."
+
+            curl -s -X POST "$ISSUE_URL/comments" \
+              -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+              -H "Accept: application/vnd.github+json" \
+              -d '{"body":"👋 Hello from Cypress!"}'
           else
-            echo "Comment does not contain 'cypress'. Doing nothing."
+            echo "No 'cypress' keyword found — skipping reply."
           fi
