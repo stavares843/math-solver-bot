@@ -11,19 +11,11 @@ jobs:
     permissions:
       issues: write  # Required to post comments
     steps:
-      - name: Reply if comment includes "cypress"
-        run: |
-          COMMENT_BODY="${{ github.event.comment.body }}"
-          ISSUE_URL="${{ github.event.comment.issue_url }}"
-          echo "Comment body: $COMMENT_BODY"
+      - name: Respond with Hello 👋
+        if: contains(github.event.comment.body, 'cypress')
+        uses: peter-evans/create-or-update-comment@v3
+        with:
+          issue-number: ${{ github.event.issue.number }}
+          body: |
+            👋 Hello from Cypress!
 
-          if [[ "$COMMENT_BODY" =~ cypress ]]; then
-            echo "✅ Posting reply to comment..."
-
-            curl -s -X POST "$ISSUE_URL/comments" \
-              -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
-              -H "Accept: application/vnd.github+json" \
-              -d '{"body":"👋 Hello from Cypress!"}'
-          else
-            echo "No 'cypress' keyword found — skipping reply."
-          fi
