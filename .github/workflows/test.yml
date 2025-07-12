@@ -4,16 +4,37 @@ on:
   issue_comment:
     types: [created, edited, deleted]
 
+permissions:
+  pull-requests: write  # Required for commenting back on PRs
+
 jobs:
   job01:
     if: contains(github.event.comment.html_url, '/pull/')
     runs-on: ubuntu-latest
 
     steps:
-      - name: say hello
+      - name: Say hello
         if: contains(github.event.comment.body, '/support')
         run: echo "say hello"
 
-      - name: test
+      - name: Comment back for support
+        if: contains(github.event.comment.body, '/support')
+        uses: mshick/add-pr-comment@v2.8.2
+        with:
+          message: |
+            👋 Support command received! Thanks for reaching out.
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Test
         if: contains(github.event.comment.body, '/test')
         run: echo "test"
+
+      - name: Comment back for test
+        if: contains(github.event.comment.body, '/test')
+        uses: mshick/add-pr-comment@v2.8.2
+        with:
+          message: |
+            ✅ Test command received! Running checks...
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
