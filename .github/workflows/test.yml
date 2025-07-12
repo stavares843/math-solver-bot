@@ -1,20 +1,19 @@
-name: Respond to /cypress
+name: pull request comment
 
 on:
   issue_comment:
-    types: [created]
-
-permissions:
-  issues: write
+    types: [created, edited, deleted]
 
 jobs:
-  respond:
-    if: github.event.issue.pull_request && contains(github.event.comment.body, 'cypress')
+  job01:
+    if: contains(github.event.comment.html_url, '/pull/')
     runs-on: ubuntu-latest
+
     steps:
-      - name: Say Hello 👋
-        uses: peter-evans/create-or-update-comment@v3
-        with:
-          issue-number: ${{ github.event.issue.number }}
-          body: |
-            👋 Hello from Cypress!
+      - name: say hello
+        if: contains(github.event.comment.body, '/support')
+        run: echo "say hello"
+
+      - name: test
+        if: contains(github.event.comment.body, '/test')
+        run: echo "test"
