@@ -1,0 +1,21 @@
+name: Say Hello on /cypress Comment
+
+on:
+  issue_comment:
+    types: [created]
+
+jobs:
+  say-hello:
+    if: github.event.issue.pull_request
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check for 'cypress' in comment
+        run: |
+          COMMENT_BODY="${{ github.event.comment.body }}"
+          echo "Received comment: $COMMENT_BODY"
+
+          if [[ "$COMMENT_BODY" =~ cypress ]]; then
+            echo "👋 Hello from Cypress!"
+          else
+            echo "Comment does not contain 'cypress'. Doing nothing."
+          fi
