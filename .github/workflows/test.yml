@@ -5,7 +5,7 @@ on:
     types: [created, edited, deleted]
 
 permissions:
-  pull-requests: write  # Required for commenting back on PRs
+  pull-requests: write
 
 jobs:
   job01:
