@@ -1,8 +1,8 @@
 name: CI / PR
 
 on:
-  issue_comment:
-    types: [created]
+  pull_request_target:
+    types: [opened, synchronize]
 
 permissions:
   contents: read
@@ -10,23 +10,15 @@ permissions:
   issues: read
 
 concurrency:
-  group: ci-pr-${{ github.event.issue.number }}
+  group: ci-pr-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
 jobs:
   ci:
-    if: |
-      github.event.issue.pull_request &&
-      contains(github.event.comment.body, '/ci')
+    if: contains(github.event.pull_request.body, '/ci')
     runs-on: ubuntu-latest
 
     steps:
-      - name: Debug event
-        run: |
-          echo "Triggered by /ci comment"
-          echo "PR number: ${{ github.event.issue.number }}"
-          echo "Comment: ${{ github.event.comment.body }}"
-
       - name: Checkout
         uses: actions/checkout@v4
 
