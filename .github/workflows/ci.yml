@@ -1,29 +1,66 @@
 name: CI / PR
 
 on:
-  pull_request_target:
-    types: [opened, synchronize]
+  issue_comment:
+    types: [created]
 
 permissions:
   contents: read
   pull-requests: read
+  checks: write
   issues: read
-
-concurrency:
-  group: ci-pr-${{ github.event.pull_request.number }}
-  cancel-in-progress: true
 
 jobs:
   ci:
-    if: contains(github.event.pull_request.body, '/ci')
+    if: |
+      github.event.issue.pull_request &&
+      contains(github.event.comment.body, '/ci')
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - name: Get PR SHA
+        id: pr
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const pr = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.issue.number
+            })
+            core.setOutput('sha', pr.data.head.sha)
 
-      - name: Fake CI step
+      - name: Create CI check (pending)
+        id: check
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const res = await github.rest.checks.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              name: 'CI / PR',
+              head_sha: '${{ steps.pr.outputs.sha }}',
+              status: 'in_progress'
+            })
+            core.setOutput('id', res.data.id)
+
+      - uses: actions/checkout@v4
+
+      - name: Fake CI
         run: |
           echo "Running CI..."
           sleep 10
           echo "CI done"
+
+      - name: Complete CI check
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.checks.update({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              check_run_id: Number('${{ steps.check.outputs.id }}'),
+              status: 'completed',
+              conclusion: '${{ job.status }}'
+            })
