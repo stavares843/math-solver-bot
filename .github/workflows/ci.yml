@@ -1,13 +1,8 @@
 name: CI / PR
 
 on:
-  pull_request_target:
-    types: [opened, synchronize]
-
-permissions:
-  contents: read
-  pull-requests: read
-  issues: read
+  pull_request:
+    types: [opened, synchronize, labeled]
 
 concurrency:
   group: ci-pr-${{ github.event.pull_request.number }}
@@ -15,15 +10,9 @@ concurrency:
 
 jobs:
   ci:
-    if: contains(github.event.pull_request.body, '/ci')
+    if: contains(github.event.pull_request.labels.*.name, 'ci')
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Fake CI step
-        run: |
-          echo "Running CI..."
-          sleep 10
-          echo "CI done"
+      - uses: actions/checkout@v4
+      - run: echo "Running real CI"
