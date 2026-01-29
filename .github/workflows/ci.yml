@@ -1,48 +1,37 @@
-name: CI Label via Comment
+name: CI / PR
 
 on:
   issue_comment:
     types: [created]
-  repository_dispatch:
-    types: [ci-label]
 
 permissions:
   contents: read
+  pull-requests: read
+  issues: read
+
+concurrency:
+  group: ci-pr-${{ github.event.issue.number }}
+  cancel-in-progress: true
 
 jobs:
-  detect-ci:
-    if: github.event_name == 'issue_comment' &&
-        github.event.issue.pull_request &&
-        contains(github.event.comment.body, '/ci')
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/github-script@v7
-        with:
-          script: |
-            await github.rest.repos.createDispatchEvent({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              event_type: 'ci-label',
-              client_payload: {
-                pr: context.payload.issue.number
-              }
-            });
-
-  add-label:
-    if: github.event_name == 'repository_dispatch'
+  ci:
+    if: |
+      github.event.issue.pull_request &&
+      contains(github.event.comment.body, '/ci')
     runs-on: ubuntu-latest
 
-    permissions:
-      issues: write
-      pull-requests: write
-
     steps:
-      - uses: actions/github-script@v7
-        with:
-          script: |
-            await github.rest.issues.addLabels({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: context.payload.client_payload.pr,
-              labels: ['ci'],
-            });
+      - name: Debug event
+        run: |
+          echo "Triggered by /ci comment"
+          echo "PR number: ${{ github.event.issue.number }}"
+          echo "Comment: ${{ github.event.comment.body }}"
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Fake CI step
+        run: |
+          echo "Running CI..."
+          sleep 10
+          echo "CI done"
