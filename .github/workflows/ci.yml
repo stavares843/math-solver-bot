@@ -62,6 +62,20 @@ jobs:
             done
             echo ""
             echo "Fix: renumber your migration to the next available number."
+
+            comment_body="❌ **Duplicate migration numbers within this PR**
+
+This PR contains duplicate migration numbers (> ${ENFORCE_AFTER}):
+
+$(echo "$pr_dupes_enforced" | sed 's/^/- #/')
+
+**Fix:** Renumber your migration to the next available number and push an update.
+"
+            gh api \
+              --method POST \
+              "/repos/${REPO}/issues/${THIS_PR}/comments" \
+              -f body="$comment_body" || true
+
             exit 1
           fi
 
@@ -135,6 +149,32 @@ jobs:
               echo ""
             done <<< "$conflicts"
             echo "Fix: renumber your migration to the next available number (coordinate if multiple PRs are open)."
+
+            # Post a PR comment with details
+            comment_body="❌ **Migration number conflicts across open PRs**
+
+The following migration numbers (> ${ENFORCE_AFTER}) are claimed by multiple open PRs:
+
+"
+            while read -r num; do
+              comment_body="${comment_body}### #${num}
+"
+              while read -r line; do
+                comment_body="${comment_body}- ${line}
+"
+              done < <(awk -F'\t' -v n="$num" '$1==n { print "PR #" $2 ": " $3 }' "$tmp" | sort -u)
+              comment_body="${comment_body}
+"
+            done <<< "$conflicts"
+
+            comment_body="${comment_body}**Fix:** Renumber your migration to the next available number and push an update.
+"
+
+            gh api \
+              --method POST \
+              "/repos/${REPO}/issues/${THIS_PR}/comments" \
+              -f body="$comment_body" || true
+
             exit 1
           fi
 
