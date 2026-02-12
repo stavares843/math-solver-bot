@@ -8,7 +8,7 @@ on:
 
 permissions:
   contents: read
-  pull-requests: read
+  pull-requests: write
 
 jobs:
   check-migration-sequences:
@@ -64,14 +64,15 @@ jobs:
 
             dupes_list="$(echo "$pr_dupes_enforced" | sed 's/^/- #/')"
 
-            comment_body="$(cat <<'ENDOFCOMMENT'
+            comment_body=$(cat <<'ENDOFCOMMENT'
           ❌ **Duplicate migration numbers within this PR**
 
           This PR contains duplicate migration numbers:
-
           ENDOFCOMMENT
-          )"
-            comment_body="${comment_body}${dupes_list}
+          )
+            comment_body="${comment_body}
+
+          ${dupes_list}
 
           **Fix:** Renumber your migration to the next available number and push an update."
 
@@ -144,39 +145,58 @@ jobs:
             ' "$tmp" | sort -n
           )"
 
-          if [ -n "${conflicts:-}" ]; then
-            echo "::error::Migration number conflicts across open PRs (numbers > ${ENFORCE_AFTER}): $(echo "$conflicts" | tr '\n' ' ')"
+          if [ -z "${conflicts:-}" ]; then
+            echo "No migration-number conflicts across open PRs (enforced for numbers > ${ENFORCE_AFTER})."
+            exit 0
+          fi
+
+          # ---- 4) Only fail if THIS PR is NOT the earliest claimant ----
+          # The first PR to claim a number gets priority; later PRs must renumber.
+          should_fail=""
+          for num in $conflicts; do
+            # Find the lowest PR number that claims this migration number
+            earliest_pr="$(awk -F'\t' -v n="$num" '$1==n { print $2 }' "$tmp" | sort -n | head -1)"
+            if [ "$earliest_pr" != "$THIS_PR" ]; then
+              should_fail="${should_fail} ${num}"
+            else
+              echo "Migration #${num}: this PR (#${THIS_PR}) is the earliest claimant — OK"
+            fi
+          done
+
+          if [ -z "${should_fail:-}" ]; then
+            echo "This PR has priority on all conflicting migration numbers. Passing."
+            exit 0
+          fi
+
+          # This PR is NOT the earliest claimant for some numbers — fail
+          echo "::error::Migration number conflicts (numbers > ${ENFORCE_AFTER}): ${should_fail}"
+          echo ""
+          echo "Details:"
+          for num in $should_fail; do
+            echo "  #$num is claimed by an earlier PR:"
+            awk -F'\t' -v n="$num" '$1==n { print "    PR #" $2 ": " $3 }' "$tmp" | sort -u
             echo ""
-            echo "Details:"
-            while read -r num; do
-              echo "  #$num is claimed by multiple open PRs:"
-              awk -F'\t' -v n="$num" '$1==n { print "    PR #" $2 ": " $3 }' "$tmp" | sort -u
-              echo ""
-            done <<< "$conflicts"
-            echo "Fix: renumber your migration to the next available number (coordinate if multiple PRs are open)."
+          done
+          echo "Fix: renumber your migration to the next available number."
 
-            details_md=""
-            while read -r num; do
-              [ -z "$num" ] && continue
-              details_md="${details_md}### #${num}
+          details_md=""
+          for num in $should_fail; do
+            [ -z "$num" ] && continue
+            details_md="${details_md}### #${num}
+          $(awk -F'\t' -v n="$num" '$1==n { print "- PR #" $2 ": " $3 }' "$tmp" | sort -u)
           "
-              details_md="${details_md}$(awk -F'\t' -v n="$num" '$1==n { print "- PR #" $2 ": " $3 }' "$tmp" | sort -u)
-          "
-            done <<< "$conflicts"
+          done
 
-            comment_body="❌ **Migration number conflicts across open PRs**
+          comment_body="❌ **Migration number conflict**
 
-          The following migration numbers (> ${ENFORCE_AFTER}) are claimed by multiple open PRs:
+          The following migration numbers (> ${ENFORCE_AFTER}) conflict with an earlier open PR:
 
           ${details_md}
           **Fix:** Renumber your migration to the next available number and push an update."
 
-            gh api \
-              --method POST \
-              "/repos/${REPO}/issues/${THIS_PR}/comments" \
-              -f body="$comment_body" || true
+          gh api \
+            --method POST \
+            "/repos/${REPO}/issues/${THIS_PR}/comments" \
+            -f body="$comment_body" || true
 
-            exit 1
-          fi
-
-          echo "No migration-number conflicts across open PRs (enforced for numbers > ${ENFORCE_AFTER})."
+          exit 1
