@@ -26,6 +26,7 @@ jobs:
           set -euo pipefail
 
           MIG_DIR="shared/migrations/models"
+          ENFORCE_AFTER=5  # enforce uniqueness for migration numbers > 5
 
           if [ ! -d "$MIG_DIR" ]; then
             echo "Migration directory not found: $MIG_DIR"
@@ -36,50 +37,38 @@ jobs:
           THIS_PR="${{ github.event.pull_request.number }}"
           REPO="${{ github.repository }}"
 
-          # Ensure base branch exists locally so we can compute cutoff
-          git fetch origin "${BASE_REF}":"refs/remotes/origin/${BASE_REF}"
+          echo "Enforcing uniqueness for migration numbers > ${ENFORCE_AFTER}"
+          echo "Base branch: ${BASE_REF}"
+          echo "This PR: #${THIS_PR}"
 
           extract_nums_from_dir () {
-            # numeric prefix from "93_xyz.py" -> "93"
+            # Extract numeric prefix from filenames like "93_xyz.py" -> "93"
             (cd "$1" && ls *.py 2>/dev/null | grep -oP '^\d+' || true)
           }
 
-          # ---- 1) Cutoff: max migration number currently on base branch ----
-          pushd "$MIG_DIR" >/dev/null
-          git checkout -q "origin/${BASE_REF}"
-          base_nums="$(extract_nums_from_dir .)"
-          if [ -z "$base_nums" ]; then
-            cutoff=0
-          else
-            cutoff="$(printf "%s\n" $base_nums | sort -n | tail -n1)"
-          fi
-          echo "Cutoff (max on ${BASE_REF}) = ${cutoff}"
-          popd >/dev/null
+          # ---- 1) Collect numbers from THIS PR working tree (enforced only) ----
+          pr_nums="$(extract_nums_from_dir "$MIG_DIR" | sort -n || true)"
+          pr_nums_enforced="$(printf "%s\n" $pr_nums | awk -v n="$ENFORCE_AFTER" '$1 > n' | sort -n || true)"
 
-          # ---- 2) Collect numbers from THIS PR working tree ----
-          pr_nums="$(extract_nums_from_dir "$MIG_DIR")"
-          pr_nums_future="$(printf "%s\n" $pr_nums | awk -v c="$cutoff" '$1 > c' | sort -n || true)"
-
-          # Also fail if THIS PR itself has duplicate numbers > cutoff
-          pr_dupes_future="$(printf "%s\n" $pr_nums_future | uniq -d || true)"
-          if [ -n "$pr_dupes_future" ]; then
-            echo "::error::This PR contains duplicate migration numbers (> cutoff): $(echo "$pr_dupes_future" | tr '\n' ' ')"
-            echo "Files:"
-            for d in $pr_dupes_future; do
+          # Fail if THIS PR itself has duplicate enforced numbers
+          pr_dupes_enforced="$(printf "%s\n" $pr_nums_enforced | uniq -d || true)"
+          if [ -n "$pr_dupes_enforced" ]; then
+            echo "::error::This PR contains duplicate migration numbers (> ${ENFORCE_AFTER}): $(echo "$pr_dupes_enforced" | tr '\n' ' ')"
+            echo ""
+            echo "The following migration numbers have multiple files in this PR state:"
+            for d in $pr_dupes_enforced; do
               echo "  #$d:"
               ls "$MIG_DIR" | grep -E "^${d}_" || true
             done
+            echo ""
+            echo "Fix: renumber your migration to the next available number."
             exit 1
           fi
 
-          # ---- 3) Collect numbers from OTHER OPEN PRs targeting base ----
-          # We read the PR file list via GitHub API (no git-fetching other heads).
-          # This catches conflicts across concurrent PRs.
+          # ---- 2) Collect numbers from OTHER OPEN PRs targeting base ----
           tmp="$(mktemp)"
           trap 'rm -f "$tmp"' EXIT
 
-          # Get open PR numbers on this base branch, excluding this PR
-          # gh is installed on ubuntu-latest; GH_TOKEN provided via env above.
           other_prs="$(gh api "/repos/${REPO}/pulls?state=open&base=${BASE_REF}&per_page=100" --jq '.[].number' \
                       | grep -v -x "${THIS_PR}" || true)"
 
@@ -89,26 +78,22 @@ jobs:
             echo "Other open PRs targeting ${BASE_REF}: $(echo "$other_prs" | tr '\n' ' ')"
           fi
 
-          # We'll build a list of "num<TAB>pr<TAB>filename" for all future migrations across PRs.
+          # Build list of "num<TAB>pr<TAB>filename" for enforced migrations across PRs.
           # Start with this PR:
-          if [ -n "$pr_nums_future" ]; then
+          if [ -n "$pr_nums_enforced" ]; then
             while read -r n; do
-              # list files for context (best-effort)
               for f in $(ls "$MIG_DIR" | grep -E "^${n}_" || true); do
                 printf "%s\t%s\t%s\n" "$n" "$THIS_PR" "$MIG_DIR/$f" >> "$tmp"
               done
-            done <<< "$pr_nums_future"
+            done <<< "$pr_nums_enforced"
           fi
 
-          # Now add other PRs
+          # Add other PRs:
           for pr in $other_prs; do
-            # Fetch file list (paginated)
-            # Extract filenames in MIG_DIR ending with .py, then numeric prefix.
             gh api "/repos/${REPO}/pulls/${pr}/files?per_page=100" --paginate \
               --jq '.[] | .filename' \
               | awk -v dir="${MIG_DIR}/" '
                   index($0, dir) == 1 && $0 ~ /\.py$/ {
-                    # get base name
                     n=$0
                     sub(/^.*\//, "", n)
                     if (match(n, /^[0-9]+/)) {
@@ -118,37 +103,30 @@ jobs:
                   }
                 ' \
               | while IFS=$'\t' read -r num file; do
-                  if [ "$num" -gt "$cutoff" ]; then
+                  if [ "$num" -gt "$ENFORCE_AFTER" ]; then
                     printf "%s\t%s\t%s\n" "$num" "$pr" "$file" >> "$tmp"
                   fi
                 done
           done
 
-          # ---- 4) Detect conflicts: same num claimed by 2+ different PRs ----
-          # Sort by num then PR, then count unique PRs per num.
+          # ---- 3) Detect conflicts: same num claimed by 2+ different PRs ----
           conflicts="$(
             awk -F'\t' '
-              { num=$1; pr=$2; file=$3; key=num SUBSEP pr;
-                seen[key]=1;
-                files[num]=files[num] sprintf("    PR #%s: %s\n", pr, file)
-              }
+              { num=$1; pr=$2; key=num SUBSEP pr; seen[key]=1 }
               END {
                 for (k in seen) {
                   split(k, a, SUBSEP)
-                  num=a[1]
-                  prcount[num]++
+                  prcount[a[1]]++
                 }
                 for (num in prcount) {
-                  if (prcount[num] >= 2) {
-                    print num
-                  }
+                  if (prcount[num] >= 2) print num
                 }
               }
             ' "$tmp" | sort -n
           )"
 
           if [ -n "$conflicts" ]; then
-            echo "::error::Migration number conflicts across open PRs (numbers > cutoff ${cutoff}): $(echo "$conflicts" | tr '\n' ' ')"
+            echo "::error::Migration number conflicts across open PRs (numbers > ${ENFORCE_AFTER}): $(echo "$conflicts" | tr '\n' ' ')"
             echo ""
             echo "Details:"
             while read -r num; do
@@ -156,8 +134,8 @@ jobs:
               awk -F'\t' -v n="$num" '$1==n { print "    PR #" $2 ": " $3 }' "$tmp" | sort -u
               echo ""
             done <<< "$conflicts"
-            echo "Fix: renumber your migration to the next available number (consider coordinating if many PRs are open)."
+            echo "Fix: renumber your migration to the next available number (coordinate if multiple PRs are open)."
             exit 1
           fi
 
-          echo "No migration-number conflicts across open PRs (enforced for numbers > cutoff ${cutoff})."
+          echo "No migration-number conflicts across open PRs (enforced for numbers > ${ENFORCE_AFTER})."
