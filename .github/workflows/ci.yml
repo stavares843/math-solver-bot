@@ -1,66 +1,163 @@
-name: CI / PR
+name: Check Migrations
 
 on:
-  issue_comment:
-    types: [created]
+  pull_request:
+    branches: [dev]
+    paths:
+      - "shared/migrations/models/**"
 
 permissions:
   contents: read
   pull-requests: read
-  checks: write
-  issues: read
 
 jobs:
-  ci:
-    if: |
-      github.event.issue.pull_request &&
-      contains(github.event.comment.body, '/ci')
+  check-migration-sequences:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Get PR SHA
-        id: pr
-        uses: actions/github-script@v7
+      - uses: actions/checkout@v6
         with:
-          script: |
-            const pr = await github.rest.pulls.get({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              pull_number: context.issue.number
-            })
-            core.setOutput('sha', pr.data.head.sha)
+          fetch-depth: 0
 
-      - name: Create CI check (pending)
-        id: check
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const res = await github.rest.checks.create({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              name: 'CI / PR',
-              head_sha: '${{ steps.pr.outputs.sha }}',
-              status: 'in_progress'
-            })
-            core.setOutput('id', res.data.id)
-
-      - uses: actions/checkout@v4
-
-      - name: Fake CI
+      - name: Check for duplicate migration numbers across open PRs
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          echo "Running CI..."
-          sleep 10
-          echo "CI done"
+          set -euo pipefail
 
-      - name: Complete CI check
-        if: always()
-        uses: actions/github-script@v7
-        with:
-          script: |
-            await github.rest.checks.update({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              check_run_id: Number('${{ steps.check.outputs.id }}'),
-              status: 'completed',
-              conclusion: '${{ job.status }}'
-            })
+          MIG_DIR="shared/migrations/models"
+
+          if [ ! -d "$MIG_DIR" ]; then
+            echo "Migration directory not found: $MIG_DIR"
+            exit 0
+          fi
+
+          BASE_REF="${{ github.base_ref }}"
+          THIS_PR="${{ github.event.pull_request.number }}"
+          REPO="${{ github.repository }}"
+
+          # Ensure base branch exists locally so we can compute cutoff
+          git fetch origin "${BASE_REF}":"refs/remotes/origin/${BASE_REF}"
+
+          extract_nums_from_dir () {
+            # numeric prefix from "93_xyz.py" -> "93"
+            (cd "$1" && ls *.py 2>/dev/null | grep -oP '^\d+' || true)
+          }
+
+          # ---- 1) Cutoff: max migration number currently on base branch ----
+          pushd "$MIG_DIR" >/dev/null
+          git checkout -q "origin/${BASE_REF}"
+          base_nums="$(extract_nums_from_dir .)"
+          if [ -z "$base_nums" ]; then
+            cutoff=0
+          else
+            cutoff="$(printf "%s\n" $base_nums | sort -n | tail -n1)"
+          fi
+          echo "Cutoff (max on ${BASE_REF}) = ${cutoff}"
+          popd >/dev/null
+
+          # ---- 2) Collect numbers from THIS PR working tree ----
+          pr_nums="$(extract_nums_from_dir "$MIG_DIR")"
+          pr_nums_future="$(printf "%s\n" $pr_nums | awk -v c="$cutoff" '$1 > c' | sort -n || true)"
+
+          # Also fail if THIS PR itself has duplicate numbers > cutoff
+          pr_dupes_future="$(printf "%s\n" $pr_nums_future | uniq -d || true)"
+          if [ -n "$pr_dupes_future" ]; then
+            echo "::error::This PR contains duplicate migration numbers (> cutoff): $(echo "$pr_dupes_future" | tr '\n' ' ')"
+            echo "Files:"
+            for d in $pr_dupes_future; do
+              echo "  #$d:"
+              ls "$MIG_DIR" | grep -E "^${d}_" || true
+            done
+            exit 1
+          fi
+
+          # ---- 3) Collect numbers from OTHER OPEN PRs targeting base ----
+          # We read the PR file list via GitHub API (no git-fetching other heads).
+          # This catches conflicts across concurrent PRs.
+          tmp="$(mktemp)"
+          trap 'rm -f "$tmp"' EXIT
+
+          # Get open PR numbers on this base branch, excluding this PR
+          # gh is installed on ubuntu-latest; GH_TOKEN provided via env above.
+          other_prs="$(gh api "/repos/${REPO}/pulls?state=open&base=${BASE_REF}&per_page=100" --jq '.[].number' \
+                      | grep -v -x "${THIS_PR}" || true)"
+
+          if [ -z "$other_prs" ]; then
+            echo "No other open PRs targeting ${BASE_REF}."
+          else
+            echo "Other open PRs targeting ${BASE_REF}: $(echo "$other_prs" | tr '\n' ' ')"
+          fi
+
+          # We'll build a list of "num<TAB>pr<TAB>filename" for all future migrations across PRs.
+          # Start with this PR:
+          if [ -n "$pr_nums_future" ]; then
+            while read -r n; do
+              # list files for context (best-effort)
+              for f in $(ls "$MIG_DIR" | grep -E "^${n}_" || true); do
+                printf "%s\t%s\t%s\n" "$n" "$THIS_PR" "$MIG_DIR/$f" >> "$tmp"
+              done
+            done <<< "$pr_nums_future"
+          fi
+
+          # Now add other PRs
+          for pr in $other_prs; do
+            # Fetch file list (paginated)
+            # Extract filenames in MIG_DIR ending with .py, then numeric prefix.
+            gh api "/repos/${REPO}/pulls/${pr}/files?per_page=100" --paginate \
+              --jq '.[] | .filename' \
+              | awk -v dir="${MIG_DIR}/" '
+                  index($0, dir) == 1 && $0 ~ /\.py$/ {
+                    # get base name
+                    n=$0
+                    sub(/^.*\//, "", n)
+                    if (match(n, /^[0-9]+/)) {
+                      num=substr(n, RSTART, RLENGTH)
+                      print num "\t" $0
+                    }
+                  }
+                ' \
+              | while IFS=$'\t' read -r num file; do
+                  if [ "$num" -gt "$cutoff" ]; then
+                    printf "%s\t%s\t%s\n" "$num" "$pr" "$file" >> "$tmp"
+                  fi
+                done
+          done
+
+          # ---- 4) Detect conflicts: same num claimed by 2+ different PRs ----
+          # Sort by num then PR, then count unique PRs per num.
+          conflicts="$(
+            awk -F'\t' '
+              { num=$1; pr=$2; file=$3; key=num SUBSEP pr;
+                seen[key]=1;
+                files[num]=files[num] sprintf("    PR #%s: %s\n", pr, file)
+              }
+              END {
+                for (k in seen) {
+                  split(k, a, SUBSEP)
+                  num=a[1]
+                  prcount[num]++
+                }
+                for (num in prcount) {
+                  if (prcount[num] >= 2) {
+                    print num
+                  }
+                }
+              }
+            ' "$tmp" | sort -n
+          )"
+
+          if [ -n "$conflicts" ]; then
+            echo "::error::Migration number conflicts across open PRs (numbers > cutoff ${cutoff}): $(echo "$conflicts" | tr '\n' ' ')"
+            echo ""
+            echo "Details:"
+            while read -r num; do
+              echo "  #$num is claimed by multiple open PRs:"
+              awk -F'\t' -v n="$num" '$1==n { print "    PR #" $2 ": " $3 }' "$tmp" | sort -u
+              echo ""
+            done <<< "$conflicts"
+            echo "Fix: renumber your migration to the next available number (consider coordinating if many PRs are open)."
+            exit 1
+          fi
+
+          echo "No migration-number conflicts across open PRs (enforced for numbers > cutoff ${cutoff})."
