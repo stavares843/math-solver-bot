@@ -2,7 +2,7 @@ name: Check Migrations
 
 on:
   pull_request:
-    branches: [dev]
+    branches: [main]
     paths:
       - "shared/migrations/models/**"
 
