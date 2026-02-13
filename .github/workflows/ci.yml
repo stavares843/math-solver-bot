@@ -18,7 +18,7 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Check for duplicate migration numbers across open PRs
+      - name: Validate migration numbering (PR vs dev)
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -26,7 +26,7 @@ jobs:
           set -euo pipefail
 
           MIG_DIR="shared/migrations/models"
-          ENFORCE_AFTER=5  # enforce uniqueness for migration numbers > 5
+          ENFORCE_AFTER=5
 
           if [ ! -d "$MIG_DIR" ]; then
             echo "Migration directory not found: $MIG_DIR"
@@ -37,162 +37,84 @@ jobs:
           THIS_PR="${{ github.event.pull_request.number }}"
           REPO="${{ github.repository }}"
 
-          echo "Enforcing uniqueness for migration numbers > ${ENFORCE_AFTER}"
           echo "Base branch: ${BASE_REF}"
-          echo "This PR: #${THIS_PR}"
+          echo "Enforcing rules for migration numbers > ${ENFORCE_AFTER}"
 
-          extract_nums_from_dir () {
-            (cd "$1" && ls *.py 2>/dev/null | grep -oP '^\d+' || true)
+          # Ensure we have latest dev
+          git fetch origin "${BASE_REF}":"refs/remotes/origin/${BASE_REF}"
+
+          extract_nums () {
+            git ls-tree -r --name-only "$1" -- "$MIG_DIR" \
+              | grep -E '\.py$' \
+              | sed -E 's#^.*/##' \
+              | grep -oP '^\d+' \
+              || true
           }
 
-          # ---- 1) Collect numbers from THIS PR working tree (enforced only) ----
-          pr_nums="$(extract_nums_from_dir "$MIG_DIR" | sort -n || true)"
+          # -----------------------------
+          # 1) Numbers on base branch
+          # -----------------------------
+          base_nums="$(extract_nums "origin/${BASE_REF}" | sort -n || true)"
+          base_nums_enforced="$(printf "%s\n" ${base_nums:-} | awk -v n="$ENFORCE_AFTER" '$1 > n' | sort -n || true)"
+          base_max="$(printf "%s\n" ${base_nums_enforced:-} | tail -n1 || echo "")"
+
+          echo "Current max enforced migration in ${BASE_REF}: ${base_max:-none}"
+
+          # -----------------------------
+          # 2) Numbers in THIS PR
+          # -----------------------------
+          pr_nums="$(extract_nums "${{ github.sha }}" | sort -n || true)"
           pr_nums_enforced="$(printf "%s\n" ${pr_nums:-} | awk -v n="$ENFORCE_AFTER" '$1 > n' | sort -n || true)"
 
-          # Fail if THIS PR itself has duplicate enforced numbers
-          pr_dupes_enforced="$(printf "%s\n" ${pr_nums_enforced:-} | uniq -d || true)"
-          if [ -n "${pr_dupes_enforced:-}" ]; then
-            echo "::error::This PR contains duplicate migration numbers (> ${ENFORCE_AFTER}): $(echo "$pr_dupes_enforced" | tr '\n' ' ')"
-            echo ""
-            echo "The following migration numbers have multiple files in this PR state:"
-            for d in $pr_dupes_enforced; do
-              echo "  #$d:"
-              ls "$MIG_DIR" | grep -E "^${d}_" || true
-            done
-            echo ""
-            echo "Fix: renumber your migration to the next available number."
+          failures=""
 
-            dupes_list="$(echo "$pr_dupes_enforced" | sed 's/^/- #/')"
-
-            comment_body=$(cat <<'ENDOFCOMMENT'
-          ❌ **Duplicate migration numbers within this PR**
-
-          This PR contains duplicate migration numbers:
-          ENDOFCOMMENT
-          )
-            comment_body="${comment_body}
-
-          ${dupes_list}
-
-          **Fix:** Renumber your migration to the next available number and push an update."
-
-            gh api \
-              --method POST \
-              "/repos/${REPO}/issues/${THIS_PR}/comments" \
-              -f body="$comment_body" || true
-
-            exit 1
-          fi
-
-          # ---- 2) Collect numbers from OTHER OPEN PRs targeting base ----
-          tmp="$(mktemp)"
-          trap 'rm -f "$tmp"' EXIT
-
-          other_prs="$(gh api "/repos/${REPO}/pulls?state=open&base=${BASE_REF}&per_page=100" --jq '.[].number' \
-            | grep -v -x "${THIS_PR}" || true)"
-
-          if [ -z "${other_prs:-}" ]; then
-            echo "No other open PRs targeting ${BASE_REF}."
-          else
-            echo "Other open PRs targeting ${BASE_REF}: $(echo "$other_prs" | tr '\n' ' ')"
-          fi
-
-          # Build list of "num<TAB>pr<TAB>filename" for enforced migrations across PRs.
-          # Start with this PR:
-          if [ -n "${pr_nums_enforced:-}" ]; then
-            while read -r n; do
-              [ -z "$n" ] && continue
-              for f in $(ls "$MIG_DIR" | grep -E "^${n}_" || true); do
-                printf "%s\t%s\t%s\n" "$n" "$THIS_PR" "$MIG_DIR/$f" >> "$tmp"
-              done
-            done <<< "$pr_nums_enforced"
-          fi
-
-          # Add other PRs:
-          for pr in ${other_prs:-}; do
-            gh api "/repos/${REPO}/pulls/${pr}/files?per_page=100" --paginate \
-              --jq '.[] | .filename' \
-              | awk -v dir="${MIG_DIR}/" '
-                  index($0, dir) == 1 && $0 ~ /\.py$/ {
-                    n=$0
-                    sub(/^.*\//, "", n)
-                    if (match(n, /^[0-9]+/)) {
-                      num=substr(n, RSTART, RLENGTH)
-                      print num "\t" $0
-                    }
-                  }
-                ' \
-              | while IFS=$'\t' read -r num file; do
-                  if [ "$num" -gt "$ENFORCE_AFTER" ]; then
-                    printf "%s\t%s\t%s\n" "$num" "$pr" "$file" >> "$tmp"
-                  fi
-                done
-          done
-
-          # ---- 3) Detect conflicts: same num claimed by 2+ different PRs ----
-          conflicts="$(
-            awk -F'\t' '
-              { num=$1; pr=$2; key=num SUBSEP pr; seen[key]=1 }
-              END {
-                for (k in seen) {
-                  split(k, a, SUBSEP)
-                  prcount[a[1]]++
-                }
-                for (num in prcount) {
-                  if (prcount[num] >= 2) print num
-                }
-              }
-            ' "$tmp" | sort -n
-          )"
-
-          if [ -z "${conflicts:-}" ]; then
-            echo "No migration-number conflicts across open PRs (enforced for numbers > ${ENFORCE_AFTER})."
-            exit 0
-          fi
-
-          # ---- 4) Only fail if THIS PR is NOT the earliest claimant ----
-          # The first PR to claim a number gets priority; later PRs must renumber.
-          should_fail=""
-          for num in $conflicts; do
-            # Find the lowest PR number that claims this migration number
-            earliest_pr="$(awk -F'\t' -v n="$num" '$1==n { print $2 }' "$tmp" | sort -n | head -1)"
-            if [ "$earliest_pr" != "$THIS_PR" ]; then
-              should_fail="${should_fail} ${num}"
-            else
-              echo "Migration #${num}: this PR (#${THIS_PR}) is the earliest claimant — OK"
-            fi
-          done
-
-          if [ -z "${should_fail:-}" ]; then
-            echo "This PR has priority on all conflicting migration numbers. Passing."
-            exit 0
-          fi
-
-          # This PR is NOT the earliest claimant for some numbers — fail
-          echo "::error::Migration number conflicts (numbers > ${ENFORCE_AFTER}): ${should_fail}"
-          echo ""
-          echo "Details:"
-          for num in $should_fail; do
-            echo "  #$num is claimed by an earlier PR:"
-            awk -F'\t' -v n="$num" '$1==n { print "    PR #" $2 ": " $3 }' "$tmp" | sort -u
-            echo ""
-          done
-          echo "Fix: renumber your migration to the next available number."
-
-          details_md=""
-          for num in $should_fail; do
-            [ -z "$num" ] && continue
-            details_md="${details_md}### #${num}
-          $(awk -F'\t' -v n="$num" '$1==n { print "- PR #" $2 ": " $3 }' "$tmp" | sort -u)
+          # ---- A) Duplicate numbers inside THIS PR ----
+          pr_dupes="$(printf "%s\n" ${pr_nums_enforced:-} | uniq -d || true)"
+          if [ -n "${pr_dupes:-}" ]; then
+            failures="${failures}
+          ### Duplicate migration numbers inside this PR
+          $(printf "%s\n" $pr_dupes | sed 's/^/- #/')
           "
-          done
+          fi
 
-          comment_body="❌ **Migration number conflict**
+          # ---- B) Numbers that already exist in dev ----
+          clashes="$(comm -12 <(printf "%s\n" ${pr_nums_enforced:-} | sort) <(printf "%s\n" ${base_nums_enforced:-} | sort) || true)"
+          if [ -n "${clashes:-}" ]; then
+            failures="${failures}
+          ### Migration numbers already exist in ${BASE_REF}
+          $(printf "%s\n" $clashes | sed 's/^/- #/')
+          "
+          fi
 
-          The following migration numbers (> ${ENFORCE_AFTER}) conflict with an earlier open PR:
+          # ---- C) Sequence rule: must be greater than max in dev ----
+          if [ -n "${base_max:-}" ] && [ -n "${pr_nums_enforced:-}" ]; then
+            too_low="$(printf "%s\n" ${pr_nums_enforced:-} | awk -v max="$base_max" '$1 <= max')"
+            if [ -n "${too_low:-}" ]; then
+              failures="${failures}
+          ### Migration numbers must be greater than ${base_max}
+          $(printf "%s\n" $too_low | sed 's/^/- #/')
+          "
+            fi
+          fi
 
-          ${details_md}
-          **Fix:** Renumber your migration to the next available number and push an update."
+          # -----------------------------
+          # Final result
+          # -----------------------------
+          if [ -z "${failures:-}" ]; then
+            echo "Migration numbering is valid."
+            exit 0
+          fi
+
+          echo "::error::Migration numbering validation failed."
+
+          comment_body="❌ **Migration numbering validation failed**
+
+          The following issues were found (enforced for numbers > ${ENFORCE_AFTER}):
+
+          ${failures}
+
+          **Fix:** Renumber your migration(s) to the next available number above ${base_max:-current max} and push an update.
+          "
 
           gh api \
             --method POST \
